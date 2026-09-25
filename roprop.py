@@ -1315,20 +1315,63 @@ def print_man_english() -> None:
    not match the host.
 
 {CYAN}{BOLD}16. The Whole Loop — Write, Extract, Check, Run{RESET}
-   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
-   {DIM}    ✖ \\x00 in every mov r32 immediate and in the movabs{RESET}
 
-   {DIM}    rewrite:  mov eax, 1        → xor rax, rax ; mov al, 1{RESET}
-   {DIM}              mov rsi, 0x402000 → push the string ; mov rsi, rsp{RESET}
+   {WHITE}helloworld.s{RESET} — written the obvious way, every immediate
+   loaded into a 32/64-bit register:
+
+       {DIM}section .data{RESET}
+           {DIM}msg db "Hello from roprop!"{RESET}
+       {DIM}section .text{RESET}
+           {DIM}global _start{RESET}
+       {DIM}_start:{RESET}
+           {DIM}mov rsi, msg        ; fixed address of the string{RESET}
+           {DIM}mov edi, 1          ; fd = stdout{RESET}
+           {DIM}mov edx, 18         ; length{RESET}
+           {DIM}mov eax, 1          ; write{RESET}
+           {DIM}syscall{RESET}
+           {DIM}mov eax, 60         ; exit{RESET}
+           {DIM}mov edi, 0{RESET}
+           {DIM}syscall{RESET}
+
+   {GREEN}$ nasm -f elf64 helloworld.s -o helloworld.o{RESET}
+   {GREEN}$ ld helloworld.o -o helloworld{RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   {DIM}    ✖ 36 bytes — \\x00 in every immediate{RESET}
+
+   {WHITE}helloworld_2.s{RESET} — same program, no zero byte anywhere:
+
+       {DIM}section .text{RESET}
+           {DIM}global _start{RESET}
+       {DIM}_start:{RESET}
+           {DIM}xor rbx, rbx{RESET}
+           {DIM}mov bx, 0x2170              ; "p!"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rbx, 0x6f72706f72206d6f ; "om ropro"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rbx, 0x7266206f6c6c6548 ; "Hello fr"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rsi, rsp                ; string on the stack{RESET}
+           {DIM}xor rax, rax{RESET}
+           {DIM}mov al, 1                   ; immediate via the 8-bit half{RESET}
+           {DIM}xor rdi, rdi{RESET}
+           {DIM}mov dil, 1{RESET}
+           {DIM}xor rdx, rdx{RESET}
+           {DIM}mov dl, 18{RESET}
+           {DIM}syscall{RESET}
+           {DIM}xor rax, rax{RESET}
+           {DIM}add al, 60{RESET}
+           {DIM}xor dil, dil{RESET}
+           {DIM}syscall{RESET}
 
    {GREEN}$ python roprop.py elf ./helloworld_2 -b "\\x00"{RESET}
-   {DIM}    ✔ clean — 61 bytes, no bad characters{RESET}
+   {DIM}    ✔ clean — 61 bytes{RESET}
    {GREEN}$ python roprop.py run ./helloworld_2{RESET}
-   {DIM}    → Hello HTB Academy!{RESET}
+   {DIM}    → Hello from roprop!{RESET}
 
-   Same program twice: the first build fails the badchar check, the
-   rewritten one passes it and then runs. That is the whole point of
-   keeping the assembler, the extractor and the runner in one tool.
+   Two changes carry the whole thing. The string is pushed onto the stack
+   instead of living in .data at a fixed address, and every immediate goes
+   in through the 8-bit register after the full one is zeroed. It costs 25
+   bytes and removes every \\x00.
 
 {FOOTER}
 """
@@ -1460,20 +1503,63 @@ def print_man_portuguese() -> None:
    shellcode nao bate com a do host.
 
 {CYAN}{BOLD}16. O Ciclo Completo — Escrever, Extrair, Conferir, Executar{RESET}
-   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
-   {DIM}    ✖ \\x00 em todo mov r32 com imediato e no movabs{RESET}
 
-   {DIM}    reescrita:  mov eax, 1        → xor rax, rax ; mov al, 1{RESET}
-   {DIM}                mov rsi, 0x402000 → push da string ; mov rsi, rsp{RESET}
+   {WHITE}helloworld.s{RESET} — escrito do jeito obvio, cada imediato
+   carregado num registrador de 32/64 bits:
+
+       {DIM}section .data{RESET}
+           {DIM}msg db "Hello from roprop!"{RESET}
+       {DIM}section .text{RESET}
+           {DIM}global _start{RESET}
+       {DIM}_start:{RESET}
+           {DIM}mov rsi, msg        ; endereco fixo da string{RESET}
+           {DIM}mov edi, 1          ; fd = stdout{RESET}
+           {DIM}mov edx, 18         ; tamanho{RESET}
+           {DIM}mov eax, 1          ; write{RESET}
+           {DIM}syscall{RESET}
+           {DIM}mov eax, 60         ; exit{RESET}
+           {DIM}mov edi, 0{RESET}
+           {DIM}syscall{RESET}
+
+   {GREEN}$ nasm -f elf64 helloworld.s -o helloworld.o{RESET}
+   {GREEN}$ ld helloworld.o -o helloworld{RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   {DIM}    ✖ 36 bytes — \\x00 em todo imediato{RESET}
+
+   {WHITE}helloworld_2.s{RESET} — mesmo programa, sem nenhum byte zero:
+
+       {DIM}section .text{RESET}
+           {DIM}global _start{RESET}
+       {DIM}_start:{RESET}
+           {DIM}xor rbx, rbx{RESET}
+           {DIM}mov bx, 0x2170              ; "p!"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rbx, 0x6f72706f72206d6f ; "om ropro"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rbx, 0x7266206f6c6c6548 ; "Hello fr"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rsi, rsp                ; string na pilha{RESET}
+           {DIM}xor rax, rax{RESET}
+           {DIM}mov al, 1                   ; imediato pela metade de 8 bits{RESET}
+           {DIM}xor rdi, rdi{RESET}
+           {DIM}mov dil, 1{RESET}
+           {DIM}xor rdx, rdx{RESET}
+           {DIM}mov dl, 18{RESET}
+           {DIM}syscall{RESET}
+           {DIM}xor rax, rax{RESET}
+           {DIM}add al, 60{RESET}
+           {DIM}xor dil, dil{RESET}
+           {DIM}syscall{RESET}
 
    {GREEN}$ python roprop.py elf ./helloworld_2 -b "\\x00"{RESET}
-   {DIM}    ✔ limpo — 61 bytes, nenhum bad character{RESET}
+   {DIM}    ✔ limpo — 61 bytes{RESET}
    {GREEN}$ python roprop.py run ./helloworld_2{RESET}
-   {DIM}    → Hello HTB Academy!{RESET}
+   {DIM}    → Hello from roprop!{RESET}
 
-   O mesmo programa duas vezes: a primeira build reprova na checagem de
-   badchar, a reescrita passa e ai roda. E exatamente por isso que o
-   assembler, o extrator e o runner moram na mesma ferramenta.
+   Duas mudancas sustentam tudo. A string vai pra pilha em vez de morar no
+   .data com endereco fixo, e cada imediato entra pela metade de 8 bits
+   depois de zerar o registrador inteiro. Custa 25 bytes e elimina todo
+   \\x00.
 
 {FOOTER}
 """
@@ -1605,20 +1691,63 @@ def print_man_spanish() -> None:
    shellcode no coincide con la del host.
 
 {CYAN}{BOLD}16. El Ciclo Completo — Escribir, Extraer, Revisar, Ejecutar{RESET}
-   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
-   {DIM}    ✖ \\x00 en cada mov r32 con inmediato y en el movabs{RESET}
 
-   {DIM}    reescritura:  mov eax, 1        → xor rax, rax ; mov al, 1{RESET}
-   {DIM}                  mov rsi, 0x402000 → push de la cadena ; mov rsi, rsp{RESET}
+   {WHITE}helloworld.s{RESET} — escrito del modo obvio, cada inmediato
+   cargado en un registro de 32/64 bits:
+
+       {DIM}section .data{RESET}
+           {DIM}msg db "Hello from roprop!"{RESET}
+       {DIM}section .text{RESET}
+           {DIM}global _start{RESET}
+       {DIM}_start:{RESET}
+           {DIM}mov rsi, msg        ; direccion fija de la cadena{RESET}
+           {DIM}mov edi, 1          ; fd = stdout{RESET}
+           {DIM}mov edx, 18         ; longitud{RESET}
+           {DIM}mov eax, 1          ; write{RESET}
+           {DIM}syscall{RESET}
+           {DIM}mov eax, 60         ; exit{RESET}
+           {DIM}mov edi, 0{RESET}
+           {DIM}syscall{RESET}
+
+   {GREEN}$ nasm -f elf64 helloworld.s -o helloworld.o{RESET}
+   {GREEN}$ ld helloworld.o -o helloworld{RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   {DIM}    ✖ 36 bytes — \\x00 en cada inmediato{RESET}
+
+   {WHITE}helloworld_2.s{RESET} — mismo programa, sin ningun byte cero:
+
+       {DIM}section .text{RESET}
+           {DIM}global _start{RESET}
+       {DIM}_start:{RESET}
+           {DIM}xor rbx, rbx{RESET}
+           {DIM}mov bx, 0x2170              ; "p!"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rbx, 0x6f72706f72206d6f ; "om ropro"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rbx, 0x7266206f6c6c6548 ; "Hello fr"{RESET}
+           {DIM}push rbx{RESET}
+           {DIM}mov rsi, rsp                ; cadena en la pila{RESET}
+           {DIM}xor rax, rax{RESET}
+           {DIM}mov al, 1                   ; inmediato por la mitad de 8 bits{RESET}
+           {DIM}xor rdi, rdi{RESET}
+           {DIM}mov dil, 1{RESET}
+           {DIM}xor rdx, rdx{RESET}
+           {DIM}mov dl, 18{RESET}
+           {DIM}syscall{RESET}
+           {DIM}xor rax, rax{RESET}
+           {DIM}add al, 60{RESET}
+           {DIM}xor dil, dil{RESET}
+           {DIM}syscall{RESET}
 
    {GREEN}$ python roprop.py elf ./helloworld_2 -b "\\x00"{RESET}
-   {DIM}    ✔ limpio — 61 bytes, sin bad characters{RESET}
+   {DIM}    ✔ limpio — 61 bytes{RESET}
    {GREEN}$ python roprop.py run ./helloworld_2{RESET}
-   {DIM}    → Hello HTB Academy!{RESET}
+   {DIM}    → Hello from roprop!{RESET}
 
-   El mismo programa dos veces: la primera build reprueba el chequeo de
-   badchars, la reescrita lo pasa y entonces corre. Por eso el ensamblador,
-   el extractor y el runner viven en la misma herramienta.
+   Dos cambios sostienen todo. La cadena va a la pila en vez de vivir en
+   .data con direccion fija, y cada inmediato entra por la mitad de 8 bits
+   despues de poner a cero el registro completo. Cuesta 25 bytes y elimina
+   todo \\x00.
 
 {FOOTER}
 """

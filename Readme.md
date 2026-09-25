@@ -287,32 +287,33 @@ straight from the binary, so there is no third step:
 nasm -f elf64 helloworld.s -o helloworld.o
 ld helloworld.o -o helloworld
 
-python3 roprop.py elf ./helloworld -b "\x00"
+python3 roprop.py elf ./helloworld_2 -b "\x00"
 ```
 
 ```
   Source:
-    ./helloworld  → section .text
+    ./helloworld_2  → section .text
 
   Architecture   :  amd64
   Length         :  61 byte(s)
 
   Hex:
-    4831db66bb79215348bb422041636164656d5348bb48656c6c6f2048545348...
+    4831db66bb70215348bb6f6d20726f70726f5348bb48656c6c6f206672534889e6...
 
   Escaped:
-    \x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb\x42\x20\x41\x63\x61...
+    \x48\x31\xdb\x66\xbb\x70\x21\x53\x48\xbb\x6f\x6d\x20\x72\x6f\x70...
 
   Python:
-    shellcode = b"\x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb..."
+    shellcode = b"\x48\x31\xdb\x66\xbb\x70\x21\x53\x48\xbb\x6f\x6d..."
 
   Disassembly:
 
-     0:   48 31 db                xor    rbx, rbx
-     3:   66 bb 79 21             mov    bx, 0x2179
-     7:   53                      push   rbx
-     8:   48 bb 42 20 41 63 61 64 65 6d   movabs rbx, 0x6d65646163412042
-     ...
+       0:   48 31 db                xor    rbx, rbx
+       3:   66 bb 70 21             mov    bx, 0x2170
+       7:   53                      push   rbx
+       8:   48 bb 6f 6d 20 72 6f 70 72 6f   movabs rbx, 0x6f72706f72206d6f
+      12:   53                      push   rbx
+       ...
 
   ✔  Clean — no bad characters in output.
 ```
@@ -342,9 +343,10 @@ jumping into the bytes it prints the disassembly and asks:
 ```
   About to execute:
 
-     0:   48 31 db                xor    rbx, rbx
-     3:   66 bb 79 21             mov    bx, 0x2179
-     ...
+       0:   48 31 db                xor    rbx, rbx
+       3:   66 bb 70 21             mov    bx, 0x2170
+       7:   53                      push   rbx
+       ...
 
   Length         :  61 byte(s)
   Host           :  x86_64
@@ -354,7 +356,7 @@ jumping into the bytes it prints the disassembly and asks:
   ─────────────────────────────────────────────────────────────────
   ── output ──
 
-Hello HTB Academy!
+Hello from roprop!
   ─────────────────────────────────────────────────────────────────
   ✔  Run complete.  Exit status: 0
 ```
@@ -380,39 +382,89 @@ A mismatched architecture is flagged before it turns into a confusing `SIGILL`:
 
 ### 8. The whole loop
 
-Two builds of the same program make the point better than any description. The
-first is written the obvious way — every immediate loaded into a 32/64-bit
-register, so every immediate is zero-padded:
+Two builds of the same program show the point better than any description.
+`helloworld.s` is written the obvious way — the string lives in `.data` at a
+fixed address, and every immediate is loaded into a 32/64-bit register:
+
+```nasm
+section .data
+    msg db "Hello from roprop!"
+
+section .text
+    global _start
+
+_start:
+    mov rsi, msg        ; fixed address of the string
+    mov edi, 1          ; fd = stdout
+    mov edx, 18         ; length
+    mov eax, 1          ; write
+    syscall
+
+    mov eax, 60         ; exit
+    mov edi, 0
+    syscall
+```
 
 ```console
+$ nasm -f elf64 helloworld.s -o helloworld.o && ld helloworld.o -o helloworld
 $ python3 roprop.py elf ./helloworld -b "\x00"
 
-     0:   48 be 00 20 40 00 00 00 00 00   movabs rsi, 0x402000
-     a:   bf 01 00 00 00                  mov    edi, 0x1
-     f:   ba 12 00 00 00                  mov    edx, 0x12
-     ...
+       0:   48 c7 c6 00 20 40 00    mov    rsi, 0x402000
+       7:   bf 01 00 00 00          mov    edi, 0x1
+       c:   ba 12 00 00 00          mov    edx, 0x12
+      11:   b8 01 00 00 00          mov    eax, 0x1
+      16:   0f 05                   syscall
+      18:   b8 3c 00 00 00          mov    eax, 0x3c
+      1d:   bf 00 00 00 00          mov    edi, 0x0
+      22:   0f 05                   syscall
 
   ✖  Bad char(s) present in shellcode: \x00
 ```
 
-The red bytes say exactly which instructions to rewrite. Zero the register
-first and load through its 8-bit half; push the string instead of addressing it:
+The red bytes name the instructions to fix. `helloworld_2.s` does the same work
+without a single zero — the string is pushed onto the stack instead of being
+addressed, and every immediate goes in through the 8-bit half of a register
+that was just zeroed:
 
-```
-  mov eax, 1        →  xor rax, rax ; mov al, 1
-  mov rsi, 0x402000 →  push the string ; mov rsi, rsp
+```nasm
+section .text
+    global _start
+
+_start:
+    xor rbx, rbx
+    mov bx, 0x2170              ; "p!"
+    push rbx
+    mov rbx, 0x6f72706f72206d6f ; "om ropro"
+    push rbx
+    mov rbx, 0x7266206f6c6c6548 ; "Hello fr"
+    push rbx
+    mov rsi, rsp                ; the string now lives on the stack
+
+    xor rax, rax
+    mov al, 1                   ; write
+    xor rdi, rdi
+    mov dil, 1                  ; fd = stdout
+    xor rdx, rdx
+    mov dl, 18                  ; length
+    syscall
+
+    xor rax, rax
+    add al, 60                  ; exit
+    xor dil, dil
+    syscall
 ```
 
 ```console
 $ python3 roprop.py elf ./helloworld_2 -b "\x00"
+  Length         :  61 byte(s)
   ✔  Clean — no bad characters in output.
 
 $ python3 roprop.py run ./helloworld_2
-Hello HTB Academy!
+Hello from roprop!
 ```
 
-Same program, 61 bytes, no null. That round trip is why the assembler, the
-extractor and the runner live in one tool.
+36 bytes with nulls became 61 bytes without any. That round trip — assemble,
+extract, check, run — is why the four modes live in one tool.
 
 ## Flag reference
 
@@ -807,32 +859,33 @@ binário, então não existe terceiro passo:
 nasm -f elf64 helloworld.s -o helloworld.o
 ld helloworld.o -o helloworld
 
-python3 roprop.py elf ./helloworld -b "\x00"
+python3 roprop.py elf ./helloworld_2 -b "\x00"
 ```
 
 ```
   Source:
-    ./helloworld  → section .text
+    ./helloworld_2  → section .text
 
   Architecture   :  amd64
   Length         :  61 byte(s)
 
   Hex:
-    4831db66bb79215348bb422041636164656d5348bb48656c6c6f2048545348...
+    4831db66bb70215348bb6f6d20726f70726f5348bb48656c6c6f206672534889e6...
 
   Escaped:
-    \x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb\x42\x20\x41\x63\x61...
+    \x48\x31\xdb\x66\xbb\x70\x21\x53\x48\xbb\x6f\x6d\x20\x72\x6f\x70...
 
   Python:
-    shellcode = b"\x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb..."
+    shellcode = b"\x48\x31\xdb\x66\xbb\x70\x21\x53\x48\xbb\x6f\x6d..."
 
   Disassembly:
 
-     0:   48 31 db                xor    rbx, rbx
-     3:   66 bb 79 21             mov    bx, 0x2179
-     7:   53                      push   rbx
-     8:   48 bb 42 20 41 63 61 64 65 6d   movabs rbx, 0x6d65646163412042
-     ...
+       0:   48 31 db                xor    rbx, rbx
+       3:   66 bb 70 21             mov    bx, 0x2170
+       7:   53                      push   rbx
+       8:   48 bb 6f 6d 20 72 6f 70 72 6f   movabs rbx, 0x6f72706f72206d6f
+      12:   53                      push   rbx
+       ...
 
   ✔  Clean — no bad characters in output.
 ```
@@ -862,9 +915,10 @@ ganha. Antes de saltar pros bytes, mostra o disassembly e pergunta:
 ```
   About to execute:
 
-     0:   48 31 db                xor    rbx, rbx
-     3:   66 bb 79 21             mov    bx, 0x2179
-     ...
+       0:   48 31 db                xor    rbx, rbx
+       3:   66 bb 70 21             mov    bx, 0x2170
+       7:   53                      push   rbx
+       ...
 
   Length         :  61 byte(s)
   Host           :  x86_64
@@ -874,7 +928,7 @@ ganha. Antes de saltar pros bytes, mostra o disassembly e pergunta:
   ─────────────────────────────────────────────────────────────────
   ── output ──
 
-Hello HTB Academy!
+Hello from roprop!
   ─────────────────────────────────────────────────────────────────
   ✔  Run complete.  Exit status: 0
 ```
@@ -900,40 +954,89 @@ Arquitetura incompatível é avisada antes de virar um `SIGILL` sem explicação
 
 ### 8. O ciclo completo
 
-Duas builds do mesmo programa explicam melhor que qualquer descrição. A primeira
-é escrita do jeito óbvio — cada imediato carregado num registrador de 32/64
-bits, então cada imediato vem preenchido de zero:
+Duas builds do mesmo programa mostram a ideia melhor que qualquer descrição. O
+`helloworld.s` é escrito do jeito óbvio — a string mora no `.data` num endereço
+fixo, e cada imediato é carregado num registrador de 32/64 bits:
+
+```nasm
+section .data
+    msg db "Hello from roprop!"
+
+section .text
+    global _start
+
+_start:
+    mov rsi, msg        ; endereço fixo da string
+    mov edi, 1          ; fd = stdout
+    mov edx, 18         ; tamanho
+    mov eax, 1          ; write
+    syscall
+
+    mov eax, 60         ; exit
+    mov edi, 0
+    syscall
+```
 
 ```console
+$ nasm -f elf64 helloworld.s -o helloworld.o && ld helloworld.o -o helloworld
 $ python3 roprop.py elf ./helloworld -b "\x00"
 
-     0:   48 be 00 20 40 00 00 00 00 00   movabs rsi, 0x402000
-     a:   bf 01 00 00 00                  mov    edi, 0x1
-     f:   ba 12 00 00 00                  mov    edx, 0x12
-     ...
+       0:   48 c7 c6 00 20 40 00    mov    rsi, 0x402000
+       7:   bf 01 00 00 00          mov    edi, 0x1
+       c:   ba 12 00 00 00          mov    edx, 0x12
+      11:   b8 01 00 00 00          mov    eax, 0x1
+      16:   0f 05                   syscall
+      18:   b8 3c 00 00 00          mov    eax, 0x3c
+      1d:   bf 00 00 00 00          mov    edi, 0x0
+      22:   0f 05                   syscall
 
   ✖  Bad char(s) present in shellcode: \x00
 ```
 
-Os bytes em vermelho dizem exatamente quais instruções reescrever. Zera o
-registrador antes e carrega pela metade de 8 bits; empurra a string na pilha em
-vez de endereçá-la:
+Os bytes em vermelho apontam as instruções a corrigir. O `helloworld_2.s` faz o
+mesmo trabalho sem nenhum zero — a string é empurrada na pilha em vez de
+endereçada, e cada imediato entra pela metade de 8 bits de um registrador que
+acabou de ser zerado:
 
-```
-  mov eax, 1        →  xor rax, rax ; mov al, 1
-  mov rsi, 0x402000 →  push da string ; mov rsi, rsp
+```nasm
+section .text
+    global _start
+
+_start:
+    xor rbx, rbx
+    mov bx, 0x2170              ; "p!"
+    push rbx
+    mov rbx, 0x6f72706f72206d6f ; "om ropro"
+    push rbx
+    mov rbx, 0x7266206f6c6c6548 ; "Hello fr"
+    push rbx
+    mov rsi, rsp                ; a string agora mora na pilha
+
+    xor rax, rax
+    mov al, 1                   ; write
+    xor rdi, rdi
+    mov dil, 1                  ; fd = stdout
+    xor rdx, rdx
+    mov dl, 18                  ; tamanho
+    syscall
+
+    xor rax, rax
+    add al, 60                  ; exit
+    xor dil, dil
+    syscall
 ```
 
 ```console
 $ python3 roprop.py elf ./helloworld_2 -b "\x00"
+  Length         :  61 byte(s)
   ✔  Clean — no bad characters in output.
 
 $ python3 roprop.py run ./helloworld_2
-Hello HTB Academy!
+Hello from roprop!
 ```
 
-Mesmo programa, 61 bytes, nenhum null. É esse vaivém que justifica o assembler,
-o extrator e o runner morarem na mesma ferramenta.
+36 bytes com null viraram 61 bytes sem nenhum. É esse vaivém — montar, extrair,
+conferir, executar — que justifica os quatro modos morarem na mesma ferramenta.
 
 ## Referência de flags
 
