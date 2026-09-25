@@ -6,7 +6,7 @@
   ██╔══██╗██║   ██║██╔═══╝ ██╔══██╗██║   ██║██╔═══╝
   ██║  ██║╚██████╔╝██║     ██║  ██║╚██████╔╝██║
   ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝
-  v4.0 — ROP Chain, Shellcode Filter & Assembler
+  v4.1 — ROP Chain, Shellcode Filter & Assembler
   A tool for exploit development, research and CTF.
 
 Usage:
@@ -16,16 +16,22 @@ Usage:
   python roprop.py -b "\\x00\\x0a" --ip-hex "192.168.1.77"
   python roprop.py asm "push rax" -c amd64
   python roprop.py disasm "50" -c amd64
+  python roprop.py elf ./helloworld
+  python roprop.py run ./helloworld
 
 Help:
   --help / --help-br / --help-es   short, copy-paste friendly
   --man  / --man-br  / --man-es    full manual, paged
 
 Notes:
-  * asm / disasm require pwntools (pip install pwntools). It is imported
-    lazily, so every other mode keeps working without it installed.
-  * asm / disasm use -c/--cpu (never -a) so nothing collides with the
+  * run executes the payload on THIS machine; it prints the disassembly
+    and asks first, and refuses to go ahead unattended without -y.
+  * asm / disasm / elf / run require pwntools (pip install pwntools). It is
+    imported lazily, so every other mode keeps working without it.
+  * asm / disasm / elf / run use -c/--cpu (never -a) so nothing collides with the
     pre-existing ROP flags: -a/--address, -m, -j, -s, -t, -b.
+  * elf reads the architecture out of the file header, so -c is optional
+    there — pass it only to override what the binary says.
 """
 
 import sys
@@ -89,12 +95,24 @@ PINK       = _c('\033[38;5;198m')   # hot pink — warnings
 # CONSTANTS & CONFIGURATION
 # ─────────────────────────────────────────────────────────────
 
-VERSION       = "4.0"
+VERSION       = "4.1"
 MAX_GADGET_INSTRUCTIONS = 5
 
 # Sub-commands handled by the assembler front-end. Anything NOT in this tuple
 # falls through to the original ROP/generator parser untouched.
-ASM_COMMANDS  = ("asm", "disasm")
+ASM_COMMANDS  = ("asm", "disasm", "elf", "run")
+
+# Which target architectures this host can actually jump into. Advisory
+# only: a box with binfmt_misc + qemu-user happily runs far more than this,
+# so a miss is a warning, never a refusal.
+HOST_RUNNABLE = {
+    "x86_64":  {"amd64", "x86"},
+    "i686":    {"x86"},
+    "i386":    {"x86"},
+    "aarch64": {"arm64", "arm"},
+    "armv7l":  {"arm"},
+    "armv8l":  {"arm"},
+}
 ARCH_CHOICES  = ["x86", "amd64", "arm", "arm64"]
 
 # Cookbook: human-readable categories mapped to regex patterns.
@@ -207,9 +225,16 @@ def print_banner_generator(target: str, badchars: str) -> None:
     print(SEP + "\n")
 
 
+ASM_MODE_LABELS = {
+    "asm":    "Assembler  (asm → shellcode)",
+    "disasm": "Disassembler  (shellcode → asm)",
+    "elf":    "Extractor  (binary → shellcode)",
+    "run":    "Runner  (shellcode → live process)",
+}
+
+
 def print_banner_asm(command: str, arch: str, badchars: str) -> None:
-    label = "Assembler  (asm → shellcode)" if command == "asm" \
-            else "Disassembler  (shellcode → asm)"
+    label = ASM_MODE_LABELS[command]
     print(BANNER)
     print(SEP)
     print(f"  {WHITE}Mode           {DIM}:{RESET}  {PINK}{BOLD}{label}{RESET}")
@@ -680,6 +705,14 @@ def search_gadgets(
 # CORE — ASSEMBLER / DISASSEMBLER  (pwntools-powered)
 # ─────────────────────────────────────────────────────────────
 
+def _pwntools_missing(feature: str) -> None:
+    """Bail out with the install hint, shared by every pwntools-backed mode."""
+    print(f"\n  {RED}[!] pwntools is required for {feature}.{RESET}")
+    print(f"  {YELLOW}    pip install pwntools{RESET}")
+    print(f"  {DIM}    (every other roprop mode works without it){RESET}\n")
+    sys.exit(1)
+
+
 def _load_pwntools():
     """
     Import pwntools on demand and return (asm_module, context).
@@ -692,12 +725,27 @@ def _load_pwntools():
         from pwnlib import asm as _asm_mod
         from pwnlib.context import context as _context
     except ImportError:
-        print(f"\n  {RED}[!] pwntools is required for asm / disasm mode.{RESET}")
-        print(f"  {YELLOW}    pip install pwntools{RESET}")
-        print(f"  {DIM}    (every other roprop mode works without it){RESET}\n")
-        sys.exit(1)
+        _pwntools_missing("asm / disasm mode")
     _context.log_level = "error"      # keep pwnlib's own logging out of the way
     return _asm_mod, _context
+
+
+def _load_pwntools_elf():
+    """Import pwntools' ELF reader on demand — same lazy rationale as above."""
+    try:
+        from pwnlib.elf.elf import ELF as _ELF
+    except ImportError:
+        _pwntools_missing("elf mode")
+    return _ELF
+
+
+def _load_pwntools_runner():
+    """Import pwntools' shellcode runner on demand."""
+    try:
+        from pwnlib import runner as _runner
+    except ImportError:
+        _pwntools_missing("run mode")
+    return _runner
 
 
 def parse_shellcode_hex(raw: str) -> bytes:
@@ -746,6 +794,102 @@ def disassemble(raw_bytes: bytes, arch: str) -> str:
         return asm_mod.disasm(raw_bytes)
     except Exception as exc:
         raise ValueError(f"disassembly failed — {exc}")
+
+
+# pwntools reports the ELF machine with its own spelling; map the two that
+# differ onto the names roprop uses everywhere else, so -c and the detected
+# value are always drawn from the same vocabulary.
+ELF_ARCH_ALIASES = {"i386": "x86", "aarch64": "arm64"}
+
+
+def extract_elf_section(path: str, section: str = ".text") -> tuple[bytes, str]:
+    """
+    Lift one section's raw bytes out of an already-linked binary.
+
+    This closes the gap between `nasm` + `ld` and every other mode here:
+    once the object is linked you still need the opcodes, and picking them
+    out of objdump by hand is slow and easy to get wrong. The ELF header
+    also names the architecture, which is why -c is optional for this mode.
+
+    Returns (bytes, arch) so the caller can disassemble without the user
+    having to restate what they just compiled.
+    """
+    ELF = _load_pwntools_elf()
+
+    if not os.path.isfile(path):
+        raise ValueError(f"no such file: {path}")
+
+    try:
+        binary = ELF(path, checksec=False)
+    except Exception as exc:
+        raise ValueError(f"not a readable ELF — {exc}")
+
+    try:
+        data = binary.section(section)
+    except Exception:
+        found = ", ".join(s.name for s in binary.sections if s.name) or "none"
+        raise ValueError(f"section '{section}' not found — available: {found}")
+
+    if not data:
+        raise ValueError(f"section '{section}' is empty")
+
+    return data, ELF_ARCH_ALIASES.get(binary.arch, binary.arch)
+
+
+def host_can_run(arch: str) -> bool:
+    """Whether this machine can plausibly execute shellcode built for `arch`."""
+    return arch in HOST_RUNNABLE.get(platform.machine(), set())
+
+
+def run_shellcode_local(raw: bytes, arch: str, timeout: float) -> int | None:
+    """
+    Execute shellcode in a throwaway process on this machine.
+
+    pwntools maps the bytes into a fresh process and jumps straight to them,
+    which makes this the local smoke test: does the payload really do what
+    the disassembly claims, before it goes anywhere near a target.
+
+    Returns the exit status when the process finished, else None.
+    """
+    runner = _load_pwntools_runner()
+    _, context = _load_pwntools()
+    _apply_context(context, arch)   # the runner picks the ABI off the context
+
+    try:
+        proc = runner.run_shellcode(raw)
+    except Exception as exc:
+        raise ValueError(f"could not start the shellcode — {exc}")
+
+    try:
+        # Drain the output first, always. For a write()+exit() payload —
+        # the common case — that is the entire story and the process is
+        # already gone, so there is nothing to hand a terminal to. Going
+        # straight to interactive() there would hang waiting on stdin.
+        data = proc.recvrepeat(timeout=timeout)
+        if data:
+            sys.stdout.write(data.decode(errors="replace"))
+            sys.stdout.flush()
+
+        # Still breathing after the drain means the payload is waiting for
+        # input — a shell, most likely. That is worth a terminal, if we
+        # have one to give; under a pipe or a cron job we just let go.
+        if proc.poll() is None and sys.stdin.isatty() and sys.stdout.isatty():
+            print(f"\n  {CYAN}{BOLD}── still running, handing over "
+                  f"(Ctrl+C to detach) ──{RESET}\n")
+            proc.interactive()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        try:
+            status = proc.poll()
+        except Exception:
+            status = None
+        try:
+            proc.close()
+        except Exception:
+            pass
+
+    return status
 
 
 def _hilite_hex(data: bytes, badchars: bytes) -> str:
@@ -850,6 +994,40 @@ def format_disasm_output(raw_bytes: bytes, asm_text: str, arch: str, badchars: b
     print()
     _badchar_verdict(raw_bytes, badchars)
 
+
+def format_elf_output(path: str, section: str, shellcode: bytes,
+                      asm_text: str, arch: str, badchars: bytes) -> None:
+    """
+    Report for `elf` mode: every shape of the extracted bytes at once.
+
+    Deliberately the union of the asm and disasm reports — after a build the
+    question is never just "what are the bytes" or just "what do they do",
+    it is both, plus whether anything in there will get eaten in transit.
+    """
+    escaped = "".join(f"\\x{b:02x}" for b in shellcode)
+
+    print(f"  {WHITE}{BOLD}Source:{RESET}")
+    print(f"    {CYAN}{path}{RESET}  {DIM}→ section{RESET} {YELLOW}{section}{RESET}")
+    print()
+    print(f"  {WHITE}Architecture   {DIM}:{RESET}  {YELLOW}{arch}{RESET}")
+    print(f"  {WHITE}Length         {DIM}:{RESET}  {GREEN}{len(shellcode)} byte(s){RESET}")
+    print()
+    print(f"  {WHITE}{BOLD}Hex:{RESET}")
+    print(f"    {GREEN}{_hilite_hex(shellcode, badchars)}{RESET}")
+    print()
+    print(f"  {WHITE}{BOLD}Escaped:{RESET}")
+    print(f"    {GREEN}{_hilite_escaped(shellcode, badchars)}{RESET}")
+    print()
+    print(f"  {WHITE}{BOLD}Python:{RESET}")
+    print(f'    {GREEN}shellcode = b"{escaped}"{RESET}')
+    print()
+    print(f"  {WHITE}{BOLD}Disassembly:{RESET}\n")
+    for line in asm_text.rstrip().splitlines():
+        if line.strip():
+            print(f"    {_hilite_disasm_line(line, badchars)}")
+    print()
+    _badchar_verdict(shellcode, badchars)
+
 # ─────────────────────────────────────────────────────────────
 # SHORT HELP  (--help / --help-br / --help-es)
 # ─────────────────────────────────────────────────────────────
@@ -869,11 +1047,13 @@ def print_help_english() -> None:
   {WHITE}roprop.py -b <badchars> --ip-hex <ip>{RESET}   {DIM}PUSH assembly for an IPv4{RESET}
   {WHITE}roprop.py asm <code> -c <arch>{RESET}          {DIM}assemble    → shellcode{RESET}
   {WHITE}roprop.py disasm <hex> -c <arch>{RESET}        {DIM}disassemble → assembly{RESET}
+  {WHITE}roprop.py elf <binary>{RESET}                  {DIM}binary      → shellcode{RESET}
+  {WHITE}roprop.py run <hex|binary>{RESET}              {DIM}execute locally{RESET}
 
 {YELLOW}{BOLD}FLAGS{RESET}
   {CYAN}ROP search{RESET}  -m --milk  -j --jmps  -a --address  -s --seh  -t --trash
   {CYAN}Generator{RESET}   -b --badchars-opt  --string  --ip-hex  --size {{4,8}}  --endian {{little,big}}
-  {CYAN}Assembler{RESET}   -c --cpu {{x86,amd64,arm,arm64}}  -b --badchars-opt
+  {CYAN}Assembler{RESET}   -c --cpu {{x86,amd64,arm,arm64}}  -b --badchars-opt  --section  -y
 
 {YELLOW}{BOLD}COPY & PASTE{RESET}
   {GREEN}python3 roprop.py rop.txt "\\x00\\x0a" "pop eax"{RESET}
@@ -883,6 +1063,8 @@ def print_help_english() -> None:
   {GREEN}python3 roprop.py -b "\\x00" --ip-hex "192.168.1.77"{RESET}
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
+  {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
+  {GREEN}python3 roprop.py run ./helloworld{RESET}
 
 {YELLOW}{BOLD}MORE{RESET}
   {WHITE}--man{RESET}   full manual, paged   {DIM}· --man-br (pt) · --man-es (es){RESET}
@@ -902,11 +1084,13 @@ def print_help_portuguese() -> None:
   {WHITE}roprop.py -b <badchars> --ip-hex <ip>{RESET}   {DIM}assembly PUSH de um IPv4{RESET}
   {WHITE}roprop.py asm <código> -c <arch>{RESET}        {DIM}montar     → shellcode{RESET}
   {WHITE}roprop.py disasm <hex> -c <arch>{RESET}        {DIM}desmontar  → assembly{RESET}
+  {WHITE}roprop.py elf <binario>{RESET}                 {DIM}binario    → shellcode{RESET}
+  {WHITE}roprop.py run <hex|binario>{RESET}             {DIM}executar localmente{RESET}
 
 {YELLOW}{BOLD}FLAGS{RESET}
   {CYAN}Busca ROP{RESET}   -m --milk  -j --jmps  -a --address  -s --seh  -t --trash
   {CYAN}Gerador{RESET}     -b --badchars-opt  --string  --ip-hex  --size {{4,8}}  --endian {{little,big}}
-  {CYAN}Assembler{RESET}   -c --cpu {{x86,amd64,arm,arm64}}  -b --badchars-opt
+  {CYAN}Assembler{RESET}   -c --cpu {{x86,amd64,arm,arm64}}  -b --badchars-opt  --section  -y
 
 {YELLOW}{BOLD}COPIAR E COLAR{RESET}
   {GREEN}python3 roprop.py rop.txt "\\x00\\x0a" "pop eax"{RESET}
@@ -916,6 +1100,8 @@ def print_help_portuguese() -> None:
   {GREEN}python3 roprop.py -b "\\x00" --ip-hex "192.168.1.77"{RESET}
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
+  {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
+  {GREEN}python3 roprop.py run ./helloworld{RESET}
 
 {YELLOW}{BOLD}MAIS{RESET}
   {WHITE}--man-br{RESET}  manual completo em português (paginado)
@@ -935,11 +1121,13 @@ def print_help_spanish() -> None:
   {WHITE}roprop.py -b <badchars> --ip-hex <ip>{RESET}   {DIM}assembly PUSH de una IPv4{RESET}
   {WHITE}roprop.py asm <código> -c <arch>{RESET}        {DIM}ensamblar     → shellcode{RESET}
   {WHITE}roprop.py disasm <hex> -c <arch>{RESET}        {DIM}desensamblar  → assembly{RESET}
+  {WHITE}roprop.py elf <binario>{RESET}                 {DIM}binario       → shellcode{RESET}
+  {WHITE}roprop.py run <hex|binario>{RESET}             {DIM}ejecutar localmente{RESET}
 
 {YELLOW}{BOLD}FLAGS{RESET}
   {CYAN}Búsqueda ROP{RESET} -m --milk  -j --jmps  -a --address  -s --seh  -t --trash
   {CYAN}Generador{RESET}    -b --badchars-opt  --string  --ip-hex  --size {{4,8}}  --endian {{little,big}}
-  {CYAN}Ensamblador{RESET}  -c --cpu {{x86,amd64,arm,arm64}}  -b --badchars-opt
+  {CYAN}Ensamblador{RESET}  -c --cpu {{x86,amd64,arm,arm64}}  -b --badchars-opt  --section  -y
 
 {YELLOW}{BOLD}COPIAR Y PEGAR{RESET}
   {GREEN}python3 roprop.py rop.txt "\\x00\\x0a" "pop eax"{RESET}
@@ -949,6 +1137,8 @@ def print_help_spanish() -> None:
   {GREEN}python3 roprop.py -b "\\x00" --ip-hex "192.168.1.77"{RESET}
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
+  {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
+  {GREEN}python3 roprop.py run ./helloworld{RESET}
 
 {YELLOW}{BOLD}MÁS{RESET}
   {WHITE}--man-es{RESET}  manual completo en español (paginado)
@@ -958,26 +1148,38 @@ def print_help_spanish() -> None:
 
 
 def print_help_asm() -> None:
-    """Short help for `roprop.py asm|disasm --help`."""
+    """Short help for `roprop.py asm|disasm|elf --help`."""
     print(f"""
-{CYAN}{BOLD}roprop v{VERSION}{RESET}{DIM} — assembler / disassembler (pwntools){RESET}
+{CYAN}{BOLD}roprop v{VERSION}{RESET}{DIM} — assembler / disassembler / extractor / runner (pwntools){RESET}
 
 {YELLOW}{BOLD}USAGE{RESET}
   {WHITE}roprop.py asm <code> [-c ARCH] [-b BADCHARS]{RESET}
   {WHITE}roprop.py disasm <hex> [-c ARCH] [-b BADCHARS]{RESET}
+  {WHITE}roprop.py elf <binary> [-b BADCHARS] [--section NAME]{RESET}
+  {WHITE}roprop.py run <hex|binary> [-c ARCH] [-y] [--timeout SEC]{RESET}
 
 {YELLOW}{BOLD}FLAGS{RESET}
   {CYAN}-c, --cpu{RESET}            {{x86, amd64, arm, arm64}}   {DIM}(default: amd64){RESET}
   {CYAN}-b, --badchars-opt{RESET}   {DIM}flag bad chars in the produced shellcode{RESET}
+  {CYAN}--section{RESET}            {DIM}section to lift in elf mode (default: .text){RESET}
+  {CYAN}-y, --yes{RESET}            {DIM}skip the confirmation prompt in run mode{RESET}
+  {CYAN}--timeout{RESET}            {DIM}output wait in run mode without a tty (default: 5){RESET}
 
 {YELLOW}{BOLD}HEX INPUT ACCEPTED BY disasm{RESET}
   {DIM}5058  ·  50 58  ·  50,58  ·  \\x50\\x58  ·  0x50 0x58{RESET}
+
+{YELLOW}{BOLD}NOTE ON elf AND run{RESET}
+  {DIM}Both take a binary path and read the architecture from its header,{RESET}
+  {DIM}so -c is only for overrides. run also accepts plain hex, prints the{RESET}
+  {DIM}disassembly before executing, and asks for confirmation first.{RESET}
 
 {YELLOW}{BOLD}COPY & PASTE{RESET}
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py asm "xor eax, eax" -c x86 -b "\\x00\\x0a"{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
   {GREEN}python3 roprop.py disasm "50" -c amd64{RESET}
+  {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
+  {GREEN}python3 roprop.py run ./helloworld{RESET}
 
 {YELLOW}{BOLD}MORE{RESET}
   {WHITE}--man{RESET}   full manual, paged   {DIM}· --man-br (pt) · --man-es (es){RESET}
@@ -1002,6 +1204,8 @@ def print_man_english() -> None:
   • {CYAN}IP Generator {RESET}: python roprop.py -b "\\x00\\x0a" --ip-hex "192.168.1.77"
   • {CYAN}Assemble     {RESET}: python roprop.py asm "push rax" -c amd64
   • {CYAN}Disassemble  {RESET}: python roprop.py disasm "50" -c amd64
+  • {CYAN}ELF Extract  {RESET}: python roprop.py elf ./helloworld
+  • {CYAN}Run Locally  {RESET}: python roprop.py run ./helloworld
 
 {YELLOW}{BOLD}POSITIONAL ARGUMENTS:{RESET}
   {PINK}file          {RESET} Gadget file produced by rp++ or ROPgadget
@@ -1093,6 +1297,20 @@ def print_man_english() -> None:
    {GREEN}$ python roprop.py asm "xor eax, eax" -c x86 -b "\\x00\\x0a"{RESET}
    Assembles and flags any bad char found in the resulting shellcode
 
+{CYAN}{BOLD}14. Lift Shellcode out of a Compiled Binary (elf){RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   Reads .text straight from the ELF, so nasm + ld is the whole toolchain.
+   The architecture comes from the file header — -c is only for overrides,
+   and --section lifts something other than .text.
+
+{CYAN}{BOLD}15. Execute Shellcode on This Machine (run){RESET}
+   {GREEN}$ python roprop.py run ./helloworld{RESET}
+   {GREEN}$ python roprop.py run "4831c0b03c4831ff0f05" -y{RESET}
+   Takes a binary or plain hex. Prints the disassembly first, then asks
+   before jumping into it; -y skips the prompt and is required when there
+   is no terminal to confirm at. Warns when the target architecture does
+   not match the host.
+
 {FOOTER}
 """
     show_help(man_text)
@@ -1113,6 +1331,8 @@ def print_man_portuguese() -> None:
   • {CYAN}Gerar IP     {RESET}: python roprop.py -b "\\x00\\x0a" --ip-hex "192.168.1.77"
   • {CYAN}Montar ASM   {RESET}: python roprop.py asm "push rax" -c amd64
   • {CYAN}Desmontar    {RESET}: python roprop.py disasm "50" -c amd64
+  • {CYAN}Extrair ELF  {RESET}: python roprop.py elf ./helloworld
+  • {CYAN}Executar     {RESET}: python roprop.py run ./helloworld
 
 {YELLOW}{BOLD}ARGUMENTOS POSICIONAIS:{RESET}
   {PINK}arquivo       {RESET} Arquivo de gadgets do rp++ ou ROPgadget
@@ -1204,6 +1424,20 @@ def print_man_portuguese() -> None:
    {GREEN}$ python roprop.py asm "xor eax, eax" -c x86 -b "\\x00\\x0a"{RESET}
    Monta e destaca em vermelho qualquer bad char presente no shellcode
 
+{CYAN}{BOLD}14. Extrair Shellcode de um Binario Compilado (elf){RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   Le a secao .text direto do ELF, entao nasm + ld ja basta como toolchain.
+   A arquitetura vem do cabecalho do arquivo — -c so serve para sobrescrever,
+   e --section extrai outra secao que nao a .text.
+
+{CYAN}{BOLD}15. Executar Shellcode Nesta Maquina (run){RESET}
+   {GREEN}$ python roprop.py run ./helloworld{RESET}
+   {GREEN}$ python roprop.py run "4831c0b03c4831ff0f05" -y{RESET}
+   Aceita um binario ou hex puro. Mostra o disassembly antes e pede
+   confirmacao antes de saltar pro codigo; -y pula o prompt e e obrigatorio
+   quando nao ha terminal pra confirmar. Avisa quando a arquitetura do
+   shellcode nao bate com a do host.
+
 {FOOTER}
 """
     show_help(help_text)
@@ -1224,6 +1458,8 @@ def print_man_spanish() -> None:
   • {CYAN}Generar IP    {RESET}: python roprop.py -b "\\x00\\x0a" --ip-hex "192.168.1.77"
   • {CYAN}Ensamblar     {RESET}: python roprop.py asm "push rax" -c amd64
   • {CYAN}Desensamblar  {RESET}: python roprop.py disasm "50" -c amd64
+  • {CYAN}Extraer ELF   {RESET}: python roprop.py elf ./helloworld
+  • {CYAN}Ejecutar      {RESET}: python roprop.py run ./helloworld
 
 {YELLOW}{BOLD}ARGUMENTOS POSICIONALES:{RESET}
   {PINK}archivo       {RESET} Archivo de gadgets de rp++ o ROPgadget
@@ -1314,6 +1550,20 @@ def print_man_spanish() -> None:
 {CYAN}{BOLD}13. Ensamblar Verificando Bad Chars{RESET}
    {GREEN}$ python roprop.py asm "xor eax, eax" -c x86 -b "\\x00\\x0a"{RESET}
    Ensambla y resalta en rojo cualquier bad char presente en el shellcode
+
+{CYAN}{BOLD}14. Extraer Shellcode de un Binario Compilado (elf){RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   Lee la seccion .text directo del ELF, asi nasm + ld basta como toolchain.
+   La arquitectura viene del encabezado — -c solo sirve para sobrescribir,
+   y --section extrae otra seccion distinta de .text.
+
+{CYAN}{BOLD}15. Ejecutar Shellcode en Esta Maquina (run){RESET}
+   {GREEN}$ python roprop.py run ./helloworld{RESET}
+   {GREEN}$ python roprop.py run "4831c0b03c4831ff0f05" -y{RESET}
+   Acepta un binario o hex puro. Muestra el disassembly antes y pide
+   confirmacion antes de saltar al codigo; -y omite el prompt y es
+   obligatorio cuando no hay terminal. Avisa cuando la arquitectura del
+   shellcode no coincide con la del host.
 
 {FOOTER}
 """
@@ -1433,21 +1683,169 @@ def build_asm_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("command", choices=list(ASM_COMMANDS),
-                        help="asm (assemble source) or disasm (disassemble shellcode)")
-    parser.add_argument("code",
-                        help="Assembly source for asm, or hex shellcode for disasm")
-    parser.add_argument("-c", "--cpu", dest="arch", default="amd64",
+                        help="asm (assemble source), disasm (decode shellcode), "
+                             "elf (lift shellcode out of a binary) "
+                             "or run (execute shellcode locally)")
+    parser.add_argument("code", metavar="INPUT",
+                        help="Assembly source for asm, hex shellcode for disasm, "
+                             "binary path for elf, hex or binary path for run")
+    # default=None, not "amd64": elf reads the architecture out of the file
+    # header, and that is only possible if we can tell "user said amd64"
+    # apart from "user said nothing".
+    parser.add_argument("-c", "--cpu", dest="arch", default=None,
                         choices=ARCH_CHOICES, metavar="ARCH",
-                        help=f"Target architecture: {', '.join(ARCH_CHOICES)} (default: amd64)")
+                        help=f"Target architecture: {', '.join(ARCH_CHOICES)} "
+                             f"(default: amd64; elf reads it from the file)")
     parser.add_argument("-b", "--badchars-opt", dest="badchars_opt", default="",
                         metavar="BADCHARS",
                         help="Bad characters to flag in the shellcode (e.g. '\\x00\\x0a')")
+    parser.add_argument("--section", default=".text", metavar="NAME",
+                        help="Section to lift in elf mode (default: .text)")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="Skip the confirmation prompt in run mode")
+    parser.add_argument("--timeout", type=float, default=5.0, metavar="SEC",
+                        help="How long to wait for output in run mode when "
+                             "there is no terminal to hand over (default: 5)")
 
     return parser
 
 
+def run_elf_mode(args, bc_bytes: bytes) -> None:
+    """
+    Handle `roprop.py elf <binary>`.
+
+    Kept off the asm/disasm path because the order of operations differs:
+    the architecture lives in the file header, so the binary has to be read
+    before the banner can honestly state what it is decoding.
+    """
+    try:
+        shellcode, detected = extract_elf_section(args.code, args.section)
+    except ValueError as exc:
+        print(f"\n  {RED}{BOLD}✖  {exc}{RESET}\n")
+        print_signature()
+        sys.exit(1)
+
+    arch = args.arch or detected
+    print_banner_asm("elf", arch, args.badchars_opt)
+
+    try:
+        show_spinner("Extracting")
+        asm_text = disassemble(shellcode, arch)
+    except ValueError as exc:
+        print(f"  {RED}{BOLD}✖  {exc}{RESET}\n")
+        print_signature()
+        sys.exit(1)
+
+    format_elf_output(args.code, args.section, shellcode, asm_text, arch, bc_bytes)
+
+    print(SEP)
+    print(f"  {GREEN}{BOLD}✔  Extraction complete.{RESET}  "
+          f"{CYAN}{BOLD}{len(shellcode)}{RESET}{WHITE} byte(s) lifted from "
+          f"{RESET}{YELLOW}{args.section}{RESET}{WHITE}.{RESET}")
+    print(SEP + "\n")
+    print_signature()
+
+
+def resolve_run_input(raw_input: str, section: str) -> tuple[bytes, str | None]:
+    """
+    Work out what the user handed `run`: a compiled binary or raw hex.
+
+    A path that exists on disk wins, because after `nasm` + `ld` the thing
+    you want to type is the file you just produced. Everything else is
+    parsed as hex, exactly like disasm. Returns (bytes, detected_arch) with
+    the arch present only when it came from an ELF header.
+    """
+    if os.path.isfile(raw_input):
+        return extract_elf_section(raw_input, section)
+    return parse_shellcode_hex(raw_input), None
+
+
+def run_run_mode(args, bc_bytes: bytes) -> None:
+    """
+    Handle `roprop.py run <hex|binary>` — execute the payload on this box.
+
+    The disassembly is printed *before* anything executes, and the run is
+    confirmed, because "paste bytes, jump to them" deserves one look first.
+    -y skips the prompt for tight edit-compile-run loops.
+    """
+    try:
+        shellcode, detected = resolve_run_input(args.code, args.section)
+    except ValueError as exc:
+        print(f"\n  {RED}{BOLD}✖  {exc}{RESET}\n")
+        print_signature()
+        sys.exit(1)
+
+    arch = args.arch or detected or "amd64"
+    print_banner_asm("run", arch, args.badchars_opt)
+
+    # The preview is best-effort on purpose. Disassembling a foreign arch
+    # needs that arch's binutils, which plenty of boxes do not carry — and
+    # missing the listing is no reason to block a run the user can still
+    # confirm. The prompt, not the preview, is the actual gate.
+    show_spinner("Preparing")
+    try:
+        asm_text = disassemble(shellcode, arch)
+    except ValueError:
+        asm_text = None
+
+    print(f"  {WHITE}{BOLD}About to execute:{RESET}\n")
+    if asm_text:
+        for line in asm_text.rstrip().splitlines():
+            if line.strip():
+                print(f"    {_hilite_disasm_line(line, bc_bytes)}")
+    else:
+        print(f"    {ORANGE}! no disassembly — install binutils for {arch} to preview{RESET}")
+        print(f"    {GREEN}{_hilite_escaped(shellcode, bc_bytes)}{RESET}")
+    print()
+    print(f"  {WHITE}Length         {DIM}:{RESET}  {GREEN}{len(shellcode)} byte(s){RESET}")
+    print(f"  {WHITE}Host           {DIM}:{RESET}  {CYAN}{platform.machine()}{RESET}")
+    print()
+
+    if not host_can_run(arch):
+        print(f"  {ORANGE}{BOLD}!  {arch} shellcode on a {platform.machine()} host.{RESET}")
+        print(f"  {DIM}   Expect SIGILL unless binfmt_misc/qemu-user is set up.{RESET}\n")
+
+    if bc_bytes:
+        _badchar_verdict(shellcode, bc_bytes)
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(f"  {RED}{BOLD}✖  Refusing to run unattended.{RESET}")
+            print(f"  {DIM}   No terminal to confirm at — pass -y if you meant it.{RESET}\n")
+            print_signature()
+            sys.exit(1)
+        try:
+            answer = input(f"  {YELLOW}{BOLD}Execute this on the local machine? "
+                           f"{RESET}{DIM}[y/N]{RESET} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            print(f"\n  {DIM}Aborted — nothing was executed.{RESET}\n")
+            print_signature()
+            return
+        print()
+
+    print(SEP)
+    print(f"  {CYAN}{BOLD}── output ──{RESET}\n")
+
+    try:
+        status = run_shellcode_local(shellcode, arch, args.timeout)
+    except ValueError as exc:
+        print(f"\n  {RED}{BOLD}✖  {exc}{RESET}\n")
+        print_signature()
+        sys.exit(1)
+
+    verdict = (f"{CYAN}{BOLD}{status}{RESET}" if status is not None
+               else f"{DIM}not reported{RESET}")
+    print()
+    print(SEP)
+    print(f"  {GREEN}{BOLD}✔  Run complete.{RESET}  {WHITE}Exit status: {RESET}{verdict}")
+    print(SEP + "\n")
+    print_signature()
+
+
 def run_asm_mode(argv: list[str]) -> None:
-    """Handle `roprop.py asm ...` / `roprop.py disasm ...`."""
+    """Handle `roprop.py asm ...` / `disasm ...` / `elf ...` / `run ...`."""
     # argparse's own -h is disabled here too, so serve the short asm help.
     if "-h" in argv or "--help" in argv:
         print_help_asm()
@@ -1455,21 +1853,30 @@ def run_asm_mode(argv: list[str]) -> None:
     args     = build_asm_parser().parse_args(argv)
     bc_bytes = parse_badchars(args.badchars_opt)
 
-    print_banner_asm(args.command, args.arch, args.badchars_opt)
+    if args.command == "elf":
+        run_elf_mode(args, bc_bytes)
+        return
+
+    if args.command == "run":
+        run_run_mode(args, bc_bytes)
+        return
+
+    arch = args.arch or "amd64"
+    print_banner_asm(args.command, arch, args.badchars_opt)
     _load_pwntools()          # fail fast, before the spinner burns two seconds
 
     try:
         if args.command == "asm":
             show_spinner("Assembling")
-            shellcode = assemble(args.code, args.arch)
-            format_asm_output(args.code, shellcode, args.arch, bc_bytes)
+            shellcode = assemble(args.code, arch)
+            format_asm_output(args.code, shellcode, arch, bc_bytes)
             done = f"{GREEN}{BOLD}✔  Assembly complete.{RESET}  " \
                    f"{CYAN}{BOLD}{len(shellcode)}{RESET}{WHITE} byte(s) produced.{RESET}"
         else:
             raw = parse_shellcode_hex(args.code)
             show_spinner("Disassembling")
-            asm_text = disassemble(raw, args.arch)
-            format_disasm_output(raw, asm_text, args.arch, bc_bytes)
+            asm_text = disassemble(raw, arch)
+            format_disasm_output(raw, asm_text, arch, bc_bytes)
             done = f"{GREEN}{BOLD}✔  Disassembly complete.{RESET}  " \
                    f"{CYAN}{BOLD}{len(raw)}{RESET}{WHITE} byte(s) decoded.{RESET}"
     except ValueError as exc:
