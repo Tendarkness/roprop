@@ -378,6 +378,42 @@ A mismatched architecture is flagged before it turns into a confusing `SIGILL`:
 > the prompt help, but neither replaces a disposable VM when the shellcode is
 > not yours.
 
+### 8. The whole loop
+
+Two builds of the same program make the point better than any description. The
+first is written the obvious way — every immediate loaded into a 32/64-bit
+register, so every immediate is zero-padded:
+
+```console
+$ python3 roprop.py elf ./helloworld -b "\x00"
+
+     0:   48 be 00 20 40 00 00 00 00 00   movabs rsi, 0x402000
+     a:   bf 01 00 00 00                  mov    edi, 0x1
+     f:   ba 12 00 00 00                  mov    edx, 0x12
+     ...
+
+  ✖  Bad char(s) present in shellcode: \x00
+```
+
+The red bytes say exactly which instructions to rewrite. Zero the register
+first and load through its 8-bit half; push the string instead of addressing it:
+
+```
+  mov eax, 1        →  xor rax, rax ; mov al, 1
+  mov rsi, 0x402000 →  push the string ; mov rsi, rsp
+```
+
+```console
+$ python3 roprop.py elf ./helloworld_2 -b "\x00"
+  ✔  Clean — no bad characters in output.
+
+$ python3 roprop.py run ./helloworld_2
+Hello HTB Academy!
+```
+
+Same program, 61 bytes, no null. That round trip is why the assembler, the
+extractor and the runner live in one tool.
+
 ## Flag reference
 
 **Positional (ROP search)**
@@ -444,7 +480,7 @@ python3 roprop.py --help-es     # Spanish
 python3 roprop.py asm --help    # assembler/disassembler only
 ```
 
-`--man` is the full manual: every flag explained, 15 worked examples, opened in
+`--man` is the full manual: every flag explained, 16 worked examples, opened in
 a pager that starts at the top. Scroll with the mouse wheel, arrows, PgUp/PgDn;
 `q` quits.
 
@@ -862,6 +898,43 @@ Arquitetura incompatível é avisada antes de virar um `SIGILL` sem explicação
 > prompt ajudam, mas nenhum dos dois substitui uma VM descartável quando o
 > shellcode não é seu.
 
+### 8. O ciclo completo
+
+Duas builds do mesmo programa explicam melhor que qualquer descrição. A primeira
+é escrita do jeito óbvio — cada imediato carregado num registrador de 32/64
+bits, então cada imediato vem preenchido de zero:
+
+```console
+$ python3 roprop.py elf ./helloworld -b "\x00"
+
+     0:   48 be 00 20 40 00 00 00 00 00   movabs rsi, 0x402000
+     a:   bf 01 00 00 00                  mov    edi, 0x1
+     f:   ba 12 00 00 00                  mov    edx, 0x12
+     ...
+
+  ✖  Bad char(s) present in shellcode: \x00
+```
+
+Os bytes em vermelho dizem exatamente quais instruções reescrever. Zera o
+registrador antes e carrega pela metade de 8 bits; empurra a string na pilha em
+vez de endereçá-la:
+
+```
+  mov eax, 1        →  xor rax, rax ; mov al, 1
+  mov rsi, 0x402000 →  push da string ; mov rsi, rsp
+```
+
+```console
+$ python3 roprop.py elf ./helloworld_2 -b "\x00"
+  ✔  Clean — no bad characters in output.
+
+$ python3 roprop.py run ./helloworld_2
+Hello HTB Academy!
+```
+
+Mesmo programa, 61 bytes, nenhum null. É esse vaivém que justifica o assembler,
+o extrator e o runner morarem na mesma ferramenta.
+
 ## Referência de flags
 
 **Posicionais (busca ROP)**
@@ -928,7 +1001,7 @@ python3 roprop.py --help-es     # espanhol
 python3 roprop.py asm --help    # só o assembler/disassembler
 ```
 
-O `--man` é o manual completo: cada flag explicada, 15 exemplos resolvidos,
+O `--man` é o manual completo: cada flag explicada, 16 exemplos resolvidos,
 aberto num pager que começa no topo. Role com o scroll do mouse, setas ou
 PgUp/PgDn; `q` sai.
 

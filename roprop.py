@@ -17,7 +17,7 @@ Usage:
   python roprop.py asm "push rax" -c amd64
   python roprop.py disasm "50" -c amd64
   python roprop.py elf ./helloworld
-  python roprop.py run ./helloworld
+  python roprop.py run ./helloworld_2
 
 Help:
   --help / --help-br / --help-es   short, copy-paste friendly
@@ -1064,7 +1064,7 @@ def print_help_english() -> None:
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
   {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
-  {GREEN}python3 roprop.py run ./helloworld{RESET}
+  {GREEN}python3 roprop.py run ./helloworld_2{RESET}
 
 {YELLOW}{BOLD}MORE{RESET}
   {WHITE}--man{RESET}   full manual, paged   {DIM}· --man-br (pt) · --man-es (es){RESET}
@@ -1101,7 +1101,7 @@ def print_help_portuguese() -> None:
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
   {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
-  {GREEN}python3 roprop.py run ./helloworld{RESET}
+  {GREEN}python3 roprop.py run ./helloworld_2{RESET}
 
 {YELLOW}{BOLD}MAIS{RESET}
   {WHITE}--man-br{RESET}  manual completo em português (paginado)
@@ -1138,7 +1138,7 @@ def print_help_spanish() -> None:
   {GREEN}python3 roprop.py asm "push rax; pop rbx" -c amd64{RESET}
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
   {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
-  {GREEN}python3 roprop.py run ./helloworld{RESET}
+  {GREEN}python3 roprop.py run ./helloworld_2{RESET}
 
 {YELLOW}{BOLD}MÁS{RESET}
   {WHITE}--man-es{RESET}  manual completo en español (paginado)
@@ -1179,7 +1179,8 @@ def print_help_asm() -> None:
   {GREEN}python3 roprop.py disasm "\\x31\\xc0\\x31\\xdb" -c x86{RESET}
   {GREEN}python3 roprop.py disasm "50" -c amd64{RESET}
   {GREEN}python3 roprop.py elf ./helloworld -b "\\x00"{RESET}
-  {GREEN}python3 roprop.py run ./helloworld{RESET}
+  {GREEN}python3 roprop.py run ./helloworld_2{RESET}
+  {GREEN}python3 roprop.py run "4831c0043c4030ff0f05" -y{RESET}
 
 {YELLOW}{BOLD}MORE{RESET}
   {WHITE}--man{RESET}   full manual, paged   {DIM}· --man-br (pt) · --man-es (es){RESET}
@@ -1205,7 +1206,7 @@ def print_man_english() -> None:
   • {CYAN}Assemble     {RESET}: python roprop.py asm "push rax" -c amd64
   • {CYAN}Disassemble  {RESET}: python roprop.py disasm "50" -c amd64
   • {CYAN}ELF Extract  {RESET}: python roprop.py elf ./helloworld
-  • {CYAN}Run Locally  {RESET}: python roprop.py run ./helloworld
+  • {CYAN}Run Locally  {RESET}: python roprop.py run ./helloworld_2
 
 {YELLOW}{BOLD}POSITIONAL ARGUMENTS:{RESET}
   {PINK}file          {RESET} Gadget file produced by rp++ or ROPgadget
@@ -1298,6 +1299,8 @@ def print_man_english() -> None:
    Assembles and flags any bad char found in the resulting shellcode
 
 {CYAN}{BOLD}14. Lift Shellcode out of a Compiled Binary (elf){RESET}
+   {GREEN}$ nasm -f elf64 helloworld.s -o helloworld.o{RESET}
+   {GREEN}$ ld helloworld.o -o helloworld{RESET}
    {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
    Reads .text straight from the ELF, so nasm + ld is the whole toolchain.
    The architecture comes from the file header — -c is only for overrides,
@@ -1305,11 +1308,27 @@ def print_man_english() -> None:
 
 {CYAN}{BOLD}15. Execute Shellcode on This Machine (run){RESET}
    {GREEN}$ python roprop.py run ./helloworld{RESET}
-   {GREEN}$ python roprop.py run "4831c0b03c4831ff0f05" -y{RESET}
+   {GREEN}$ python roprop.py run "4831c0043c4030ff0f05" -y{RESET}
    Takes a binary or plain hex. Prints the disassembly first, then asks
    before jumping into it; -y skips the prompt and is required when there
    is no terminal to confirm at. Warns when the target architecture does
    not match the host.
+
+{CYAN}{BOLD}16. The Whole Loop — Write, Extract, Check, Run{RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   {DIM}    ✖ \\x00 in every mov r32 immediate and in the movabs{RESET}
+
+   {DIM}    rewrite:  mov eax, 1        → xor rax, rax ; mov al, 1{RESET}
+   {DIM}              mov rsi, 0x402000 → push the string ; mov rsi, rsp{RESET}
+
+   {GREEN}$ python roprop.py elf ./helloworld_2 -b "\\x00"{RESET}
+   {DIM}    ✔ clean — 61 bytes, no bad characters{RESET}
+   {GREEN}$ python roprop.py run ./helloworld_2{RESET}
+   {DIM}    → Hello HTB Academy!{RESET}
+
+   Same program twice: the first build fails the badchar check, the
+   rewritten one passes it and then runs. That is the whole point of
+   keeping the assembler, the extractor and the runner in one tool.
 
 {FOOTER}
 """
@@ -1332,7 +1351,7 @@ def print_man_portuguese() -> None:
   • {CYAN}Montar ASM   {RESET}: python roprop.py asm "push rax" -c amd64
   • {CYAN}Desmontar    {RESET}: python roprop.py disasm "50" -c amd64
   • {CYAN}Extrair ELF  {RESET}: python roprop.py elf ./helloworld
-  • {CYAN}Executar     {RESET}: python roprop.py run ./helloworld
+  • {CYAN}Executar     {RESET}: python roprop.py run ./helloworld_2
 
 {YELLOW}{BOLD}ARGUMENTOS POSICIONAIS:{RESET}
   {PINK}arquivo       {RESET} Arquivo de gadgets do rp++ ou ROPgadget
@@ -1425,6 +1444,8 @@ def print_man_portuguese() -> None:
    Monta e destaca em vermelho qualquer bad char presente no shellcode
 
 {CYAN}{BOLD}14. Extrair Shellcode de um Binario Compilado (elf){RESET}
+   {GREEN}$ nasm -f elf64 helloworld.s -o helloworld.o{RESET}
+   {GREEN}$ ld helloworld.o -o helloworld{RESET}
    {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
    Le a secao .text direto do ELF, entao nasm + ld ja basta como toolchain.
    A arquitetura vem do cabecalho do arquivo — -c so serve para sobrescrever,
@@ -1432,11 +1453,27 @@ def print_man_portuguese() -> None:
 
 {CYAN}{BOLD}15. Executar Shellcode Nesta Maquina (run){RESET}
    {GREEN}$ python roprop.py run ./helloworld{RESET}
-   {GREEN}$ python roprop.py run "4831c0b03c4831ff0f05" -y{RESET}
+   {GREEN}$ python roprop.py run "4831c0043c4030ff0f05" -y{RESET}
    Aceita um binario ou hex puro. Mostra o disassembly antes e pede
    confirmacao antes de saltar pro codigo; -y pula o prompt e e obrigatorio
    quando nao ha terminal pra confirmar. Avisa quando a arquitetura do
    shellcode nao bate com a do host.
+
+{CYAN}{BOLD}16. O Ciclo Completo — Escrever, Extrair, Conferir, Executar{RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   {DIM}    ✖ \\x00 em todo mov r32 com imediato e no movabs{RESET}
+
+   {DIM}    reescrita:  mov eax, 1        → xor rax, rax ; mov al, 1{RESET}
+   {DIM}                mov rsi, 0x402000 → push da string ; mov rsi, rsp{RESET}
+
+   {GREEN}$ python roprop.py elf ./helloworld_2 -b "\\x00"{RESET}
+   {DIM}    ✔ limpo — 61 bytes, nenhum bad character{RESET}
+   {GREEN}$ python roprop.py run ./helloworld_2{RESET}
+   {DIM}    → Hello HTB Academy!{RESET}
+
+   O mesmo programa duas vezes: a primeira build reprova na checagem de
+   badchar, a reescrita passa e ai roda. E exatamente por isso que o
+   assembler, o extrator e o runner moram na mesma ferramenta.
 
 {FOOTER}
 """
@@ -1459,7 +1496,7 @@ def print_man_spanish() -> None:
   • {CYAN}Ensamblar     {RESET}: python roprop.py asm "push rax" -c amd64
   • {CYAN}Desensamblar  {RESET}: python roprop.py disasm "50" -c amd64
   • {CYAN}Extraer ELF   {RESET}: python roprop.py elf ./helloworld
-  • {CYAN}Ejecutar      {RESET}: python roprop.py run ./helloworld
+  • {CYAN}Ejecutar      {RESET}: python roprop.py run ./helloworld_2
 
 {YELLOW}{BOLD}ARGUMENTOS POSICIONALES:{RESET}
   {PINK}archivo       {RESET} Archivo de gadgets de rp++ o ROPgadget
@@ -1552,6 +1589,8 @@ def print_man_spanish() -> None:
    Ensambla y resalta en rojo cualquier bad char presente en el shellcode
 
 {CYAN}{BOLD}14. Extraer Shellcode de un Binario Compilado (elf){RESET}
+   {GREEN}$ nasm -f elf64 helloworld.s -o helloworld.o{RESET}
+   {GREEN}$ ld helloworld.o -o helloworld{RESET}
    {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
    Lee la seccion .text directo del ELF, asi nasm + ld basta como toolchain.
    La arquitectura viene del encabezado — -c solo sirve para sobrescribir,
@@ -1559,11 +1598,27 @@ def print_man_spanish() -> None:
 
 {CYAN}{BOLD}15. Ejecutar Shellcode en Esta Maquina (run){RESET}
    {GREEN}$ python roprop.py run ./helloworld{RESET}
-   {GREEN}$ python roprop.py run "4831c0b03c4831ff0f05" -y{RESET}
+   {GREEN}$ python roprop.py run "4831c0043c4030ff0f05" -y{RESET}
    Acepta un binario o hex puro. Muestra el disassembly antes y pide
    confirmacion antes de saltar al codigo; -y omite el prompt y es
    obligatorio cuando no hay terminal. Avisa cuando la arquitectura del
    shellcode no coincide con la del host.
+
+{CYAN}{BOLD}16. El Ciclo Completo — Escribir, Extraer, Revisar, Ejecutar{RESET}
+   {GREEN}$ python roprop.py elf ./helloworld -b "\\x00"{RESET}
+   {DIM}    ✖ \\x00 en cada mov r32 con inmediato y en el movabs{RESET}
+
+   {DIM}    reescritura:  mov eax, 1        → xor rax, rax ; mov al, 1{RESET}
+   {DIM}                  mov rsi, 0x402000 → push de la cadena ; mov rsi, rsp{RESET}
+
+   {GREEN}$ python roprop.py elf ./helloworld_2 -b "\\x00"{RESET}
+   {DIM}    ✔ limpio — 61 bytes, sin bad characters{RESET}
+   {GREEN}$ python roprop.py run ./helloworld_2{RESET}
+   {DIM}    → Hello HTB Academy!{RESET}
+
+   El mismo programa dos veces: la primera build reprueba el chequeo de
+   badchars, la reescrita lo pasa y entonces corre. Por eso el ensamblador,
+   el extractor y el runner viven en la misma herramienta.
 
 {FOOTER}
 """
