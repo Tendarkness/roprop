@@ -10,7 +10,8 @@
   v4.1 — ROP Chain, Shellcode Filter & Assembler  |  exploit dev & CTF
 ```
 
-> **This README is available in two languages · Este README está disponível em dois idiomas**
+> **This README is available in two languages ·
+>  Este README está disponível em dois idiomas**
 > **[🇬🇧 English](#english)** · **[🇧🇷 Português](#português)**
 >
 > The tool runs in English by default. `--help` is short and copy-paste ready;
