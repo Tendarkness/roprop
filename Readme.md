@@ -7,7 +7,7 @@
   ██╔══██╗██║   ██║██╔═══╝ ██╔══██╗██║   ██║██╔═══╝
   ██║  ██║╚██████╔╝██║     ██║  ██║╚██████╔╝██║
   ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝
-  v4.0 — ROP Chain, Shellcode Filter & Assembler  |  exploit dev & CTF
+  v4.1 — ROP Chain, Shellcode Filter & Assembler  |  exploit dev & CTF
 ```
 
 > **This README is available in two languages · Este README está disponível em dois idiomas**
@@ -39,7 +39,7 @@ cd roprop
 python3 roprop.py --help
 ```
 
-Optional — enables the `asm` / `disasm` modes:
+Optional — enables the `asm`, `disasm`, `elf` and `run` modes:
 
 ```bash
 pip install pwntools
@@ -73,13 +73,13 @@ git pull
 | Item | Version | Required |
 |---|---|---|
 | Python | 3.9+ | yes |
-| pwntools | any | **only** for `asm` / `disasm` |
+| pwntools | any | **only** for `asm` / `disasm` / `elf` / `run` |
 | colorama | any | Windows only, without VT support (automatic fallback) |
 
 `pwntools` is imported **on demand**: gadget searching and the generators run
 fine on a machine without it, and you don't pay its import time on every search.
 
-## The four modes
+## The six modes
 
 | Mode | Command | Purpose |
 |---|---|---|
@@ -87,6 +87,11 @@ fine on a machine without it, and you don't pay its import time on every search.
 | Milk | `roprop.py <file> <badchars> --milk` | export a full cheat sheet to `milk.txt` |
 | Generator | `roprop.py -b <badchars> --string/--ip-hex` | build PUSH chains for a string or IP, dodging badchars |
 | Assembler | `roprop.py asm/disasm <code> -c <arch>` | assembly ⇄ shellcode with badchar verification |
+| Extractor | `roprop.py elf <binary>` | lift shellcode straight out of a compiled binary |
+| Runner | `roprop.py run <hex\|binary>` | execute the payload locally and see what it really does |
+
+The last three chain into the whole loop: write the assembly, extract the bytes
+from the linked binary, run them — without leaving the tool.
 
 ## Producing the gadget file
 
@@ -259,10 +264,119 @@ python3 roprop.py asm "xor eax, eax; mov ebx, 1" -c x86 -b "\x00\x0a"
      Rewrite the instruction(s) or encode the payload.
 ```
 
+In `disasm` the same `-b` also reddens the offending bytes **inside the
+disassembly**, so you see which instruction has to be rewritten rather than just
+that something is dirty:
+
+```
+   0:   48 be 00 20 40 00 00 00 00 00   movabs rsi, 0x402000
+                ^^       ^^ ^^ ^^ ^^ ^^   ← flagged in red
+```
+
 Architectures: `x86`, `amd64`, `arm`, `arm64`.
 
 > To assemble ARM/ARM64 on an x86 machine, pwntools needs the cross binutils:
 > `sudo apt install binutils-arm-linux-gnueabi binutils-aarch64-linux-gnu`
+
+### 6. Lifting shellcode out of a compiled binary
+
+After `nasm` + `ld` you still have to get the opcodes out. `elf` reads them
+straight from the binary, so there is no third step:
+
+```bash
+nasm -f elf64 helloworld.s -o helloworld.o
+ld helloworld.o -o helloworld
+
+python3 roprop.py elf ./helloworld -b "\x00"
+```
+
+```
+  Source:
+    ./helloworld  → section .text
+
+  Architecture   :  amd64
+  Length         :  61 byte(s)
+
+  Hex:
+    4831db66bb79215348bb422041636164656d5348bb48656c6c6f2048545348...
+
+  Escaped:
+    \x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb\x42\x20\x41\x63\x61...
+
+  Python:
+    shellcode = b"\x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb..."
+
+  Disassembly:
+
+     0:   48 31 db                xor    rbx, rbx
+     3:   66 bb 79 21             mov    bx, 0x2179
+     7:   53                      push   rbx
+     8:   48 bb 42 20 41 63 61 64 65 6d   movabs rbx, 0x6d65646163412042
+     ...
+
+  ✔  Clean — no bad characters in output.
+```
+
+The architecture comes from the ELF header, so `-c` is optional here — pass it
+only to override what the file reports. `--section` lifts something other than
+`.text`, and a wrong name tells you what is actually in there:
+
+```console
+$ python3 roprop.py elf ./helloworld --section .nope
+  ✖  section '.nope' not found — available: .note.gnu.build-id, .text, .symtab, .strtab, .shstrtab
+```
+
+### 7. Running the shellcode
+
+`run` executes the payload on the machine you are sitting at — the fastest way
+to find out whether it really does what the disassembly promises:
+
+```bash
+python3 roprop.py run ./helloworld
+python3 roprop.py run "4831c0b03c4831ff0f05" -y
+```
+
+It takes a compiled binary or plain hex; a path that exists on disk wins. Before
+jumping into the bytes it prints the disassembly and asks:
+
+```
+  About to execute:
+
+     0:   48 31 db                xor    rbx, rbx
+     3:   66 bb 79 21             mov    bx, 0x2179
+     ...
+
+  Length         :  61 byte(s)
+  Host           :  x86_64
+
+  Execute this on the local machine? [y/N] y
+
+  ─────────────────────────────────────────────────────────────────
+  ── output ──
+
+Hello HTB Academy!
+  ─────────────────────────────────────────────────────────────────
+  ✔  Run complete.  Exit status: 0
+```
+
+`-y` skips the prompt for a tight edit-compile-run loop. With no terminal to
+confirm at — a pipe, a cron job, CI — it **refuses** instead of running blind,
+so `-y` has to be explicit there.
+
+A payload that exits on its own (the usual `write()` + `exit()`) simply returns.
+One that sits waiting for input gets the terminal handed over, so a shell is
+actually usable; `Ctrl+C` detaches.
+
+A mismatched architecture is flagged before it turns into a confusing `SIGILL`:
+
+```
+  !  arm64 shellcode on a x86_64 host.
+     Expect SIGILL unless binfmt_misc/qemu-user is set up.
+```
+
+> `run` executes raw bytes on your own machine, with no sandbox. The preview and
+> the prompt help, but neither replaces a disposable VM when the shellcode is
+> not yours.
 
 ## Flag reference
 
@@ -294,14 +408,19 @@ Architectures: `x86`, `amd64`, `arm`, `arm64`.
 | `--size {4,8}` | 4 = x86 (default), 8 = x64 |
 | `--endian {little,big}` | byte order |
 
-**Assembler**
+**Assembler / Extractor / Runner**
 
 | Flag | Effect |
 |---|---|
 | `asm CODE` | assembly → shellcode |
 | `disasm HEX` | shellcode → assembly |
-| `-c`, `--cpu` | `x86`, `amd64`, `arm`, `arm64` (default `amd64`) |
-| `-b`, `--badchars-opt` | highlight badchars in the produced shellcode |
+| `elf BINARY` | compiled binary → shellcode |
+| `run HEX\|BINARY` | execute the shellcode on this machine |
+| `-c`, `--cpu` | `x86`, `amd64`, `arm`, `arm64` (default `amd64`; `elf`/`run` read it from the file) |
+| `-b`, `--badchars-opt` | highlight badchars in the shellcode and in the disassembly |
+| `--section NAME` | section to lift in `elf` mode (default `.text`) |
+| `-y`, `--yes` | skip the confirmation prompt in `run` mode |
+| `--timeout SEC` | how long `run` waits for output when there is no tty (default 5) |
 
 **Help**
 
@@ -325,7 +444,7 @@ python3 roprop.py --help-es     # Spanish
 python3 roprop.py asm --help    # assembler/disassembler only
 ```
 
-`--man` is the full manual: every flag explained, 13 worked examples, opened in
+`--man` is the full manual: every flag explained, 15 worked examples, opened in
 a pager that starts at the top. Scroll with the mouse wheel, arrows, PgUp/PgDn;
 `q` quits.
 
@@ -339,6 +458,17 @@ Redirecting either one to a file gives clean plain text, without the pager
 decoration: `python3 roprop.py --man > manual.txt`.
 
 ## What's new
+
+**v4.1**
+
+- `elf` mode: lift shellcode straight out of a linked binary, `--section` for
+  anything that is not `.text`
+- `run` mode: execute the payload locally, with the disassembly printed and a
+  confirmation asked first; `-y` skips it, and it is required with no tty
+- architecture detected from the ELF header, so `-c` is only an override
+- `run` warns when the target architecture does not match the host
+- `-b` now flags badchars in the disassembly byte column too, not just in the
+  escaped form
 
 **v4.0**
 
@@ -365,6 +495,9 @@ Research and exploit development tool, for use in labs, CTFs, certifications
 and tests **authorised in writing**. Using it against systems without
 authorisation is a crime. Responsibility for use lies with whoever runs it.
 
+`run` executes shellcode on the machine it is invoked from, with no sandbox.
+Run payloads you did not write inside a disposable VM.
+
 ## Author
 
 Built by **peanut**.
@@ -390,7 +523,7 @@ cd roprop
 python3 roprop.py --help
 ```
 
-Opcional — habilita os modos `asm` / `disasm`:
+Opcional — habilita os modos `asm`, `disasm`, `elf` e `run`:
 
 ```bash
 pip install pwntools
@@ -424,14 +557,14 @@ git pull
 | Item | Versão | Obrigatório |
 |---|---|---|
 | Python | 3.9+ | sim |
-| pwntools | qualquer | **só** para `asm` / `disasm` |
+| pwntools | qualquer | **só** para `asm` / `disasm` / `elf` / `run` |
 | colorama | qualquer | só no Windows sem suporte a VT (fallback automático) |
 
 O `pwntools` é importado **sob demanda**: a busca de gadgets e os geradores
 rodam normalmente numa máquina sem ele instalado, e você não paga o tempo de
 import dele em cada busca.
 
-## Os quatro modos
+## Os seis modos
 
 | Modo | Comando | Para quê |
 |---|---|---|
@@ -439,6 +572,11 @@ import dele em cada busca.
 | Milk | `roprop.py <arquivo> <badchars> --milk` | exportar um cheat sheet completo para `milk.txt` |
 | Gerador | `roprop.py -b <badchars> --string/--ip-hex` | montar PUSH de string ou IP driblando badchars |
 | Assembler | `roprop.py asm/disasm <código> -c <arch>` | assembly ⇄ shellcode com verificação de badchar |
+| Extrator | `roprop.py elf <binário>` | tirar o shellcode direto de um binário compilado |
+| Runner | `roprop.py run <hex\|binário>` | executar o payload localmente e ver o que ele faz de fato |
+
+Os três últimos encadeiam o ciclo inteiro: escreve o assembly, extrai os bytes
+do binário linkado, executa — sem sair da ferramenta.
 
 ## Gerando o arquivo de gadgets
 
@@ -610,10 +748,119 @@ python3 roprop.py asm "xor eax, eax; mov ebx, 1" -c x86 -b "\x00\x0a"
      Rewrite the instruction(s) or encode the payload.
 ```
 
+No `disasm` esse mesmo `-b` também pinta de vermelho os bytes problemáticos
+**dentro do disassembly**, então você vê qual instrução precisa reescrever, e não
+só que tem algo sujo:
+
+```
+   0:   48 be 00 20 40 00 00 00 00 00   movabs rsi, 0x402000
+                ^^       ^^ ^^ ^^ ^^ ^^   ← marcados em vermelho
+```
+
 Arquiteturas: `x86`, `amd64`, `arm`, `arm64`.
 
 > Para montar ARM/ARM64 numa máquina x86 o pwntools precisa do binutils cruzado:
 > `sudo apt install binutils-arm-linux-gnueabi binutils-aarch64-linux-gnu`
+
+### 6. Extraindo o shellcode de um binário compilado
+
+Depois do `nasm` + `ld` ainda falta tirar os opcodes de lá. O `elf` lê direto do
+binário, então não existe terceiro passo:
+
+```bash
+nasm -f elf64 helloworld.s -o helloworld.o
+ld helloworld.o -o helloworld
+
+python3 roprop.py elf ./helloworld -b "\x00"
+```
+
+```
+  Source:
+    ./helloworld  → section .text
+
+  Architecture   :  amd64
+  Length         :  61 byte(s)
+
+  Hex:
+    4831db66bb79215348bb422041636164656d5348bb48656c6c6f2048545348...
+
+  Escaped:
+    \x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb\x42\x20\x41\x63\x61...
+
+  Python:
+    shellcode = b"\x48\x31\xdb\x66\xbb\x79\x21\x53\x48\xbb..."
+
+  Disassembly:
+
+     0:   48 31 db                xor    rbx, rbx
+     3:   66 bb 79 21             mov    bx, 0x2179
+     7:   53                      push   rbx
+     8:   48 bb 42 20 41 63 61 64 65 6d   movabs rbx, 0x6d65646163412042
+     ...
+
+  ✔  Clean — no bad characters in output.
+```
+
+A arquitetura vem do cabeçalho do ELF, então o `-c` é opcional aqui — passe só
+para sobrescrever o que o arquivo informa. O `--section` extrai outra seção que
+não a `.text`, e errar o nome te diz o que existe de fato ali dentro:
+
+```console
+$ python3 roprop.py elf ./helloworld --section .nope
+  ✖  section '.nope' not found — available: .note.gnu.build-id, .text, .symtab, .strtab, .shstrtab
+```
+
+### 7. Executando o shellcode
+
+O `run` executa o payload na máquina em que você está — o jeito mais rápido de
+descobrir se ele faz mesmo o que o disassembly promete:
+
+```bash
+python3 roprop.py run ./helloworld
+python3 roprop.py run "4831c0b03c4831ff0f05" -y
+```
+
+Aceita um binário compilado ou hex puro; se o argumento existir em disco, ele
+ganha. Antes de saltar pros bytes, mostra o disassembly e pergunta:
+
+```
+  About to execute:
+
+     0:   48 31 db                xor    rbx, rbx
+     3:   66 bb 79 21             mov    bx, 0x2179
+     ...
+
+  Length         :  61 byte(s)
+  Host           :  x86_64
+
+  Execute this on the local machine? [y/N] y
+
+  ─────────────────────────────────────────────────────────────────
+  ── output ──
+
+Hello HTB Academy!
+  ─────────────────────────────────────────────────────────────────
+  ✔  Run complete.  Exit status: 0
+```
+
+O `-y` pula o prompt no ciclo apertado de editar-compilar-rodar. Sem terminal
+para confirmar — pipe, cron, CI — ele **recusa** em vez de executar às cegas,
+então ali o `-y` tem que ser explícito.
+
+Payload que termina sozinho (o `write()` + `exit()` de sempre) só retorna. O que
+fica esperando entrada recebe o terminal, então um shell dá para usar de
+verdade; `Ctrl+C` desconecta.
+
+Arquitetura incompatível é avisada antes de virar um `SIGILL` sem explicação:
+
+```
+  !  arm64 shellcode on a x86_64 host.
+     Expect SIGILL unless binfmt_misc/qemu-user is set up.
+```
+
+> O `run` executa bytes crus na sua própria máquina, sem sandbox. O preview e o
+> prompt ajudam, mas nenhum dos dois substitui uma VM descartável quando o
+> shellcode não é seu.
 
 ## Referência de flags
 
@@ -645,14 +892,19 @@ Arquiteturas: `x86`, `amd64`, `arm`, `arm64`.
 | `--size {4,8}` | 4 = x86 (padrão), 8 = x64 |
 | `--endian {little,big}` | ordem de bytes |
 
-**Assembler**
+**Assembler / Extrator / Runner**
 
 | Flag | Efeito |
 |---|---|
 | `asm CÓDIGO` | assembly → shellcode |
 | `disasm HEX` | shellcode → assembly |
-| `-c`, `--cpu` | `x86`, `amd64`, `arm`, `arm64` (padrão `amd64`) |
-| `-b`, `--badchars-opt` | destaca badchars no shellcode gerado |
+| `elf BINÁRIO` | binário compilado → shellcode |
+| `run HEX\|BINÁRIO` | executa o shellcode nesta máquina |
+| `-c`, `--cpu` | `x86`, `amd64`, `arm`, `arm64` (padrão `amd64`; `elf`/`run` leem do arquivo) |
+| `-b`, `--badchars-opt` | destaca badchars no shellcode e no disassembly |
+| `--section NOME` | seção a extrair no modo `elf` (padrão `.text`) |
+| `-y`, `--yes` | pula o prompt de confirmação no modo `run` |
+| `--timeout SEG` | quanto o `run` espera por saída quando não há tty (padrão 5) |
 
 **Ajuda**
 
@@ -676,7 +928,7 @@ python3 roprop.py --help-es     # espanhol
 python3 roprop.py asm --help    # só o assembler/disassembler
 ```
 
-O `--man` é o manual completo: cada flag explicada, 13 exemplos resolvidos,
+O `--man` é o manual completo: cada flag explicada, 15 exemplos resolvidos,
 aberto num pager que começa no topo. Role com o scroll do mouse, setas ou
 PgUp/PgDn; `q` sai.
 
@@ -690,6 +942,17 @@ Redirecionando qualquer um dos dois para arquivo sai texto limpo, sem a
 decoração do pager: `python3 roprop.py --man > manual.txt`.
 
 ## Novidades
+
+**v4.1**
+
+- modo `elf`: extrai o shellcode direto de um binário linkado, com `--section`
+  para o que não for `.text`
+- modo `run`: executa o payload localmente, mostrando o disassembly e pedindo
+  confirmação antes; o `-y` pula, e é obrigatório quando não há tty
+- arquitetura detectada pelo cabeçalho do ELF, então o `-c` vira só override
+- o `run` avisa quando a arquitetura do shellcode não bate com a do host
+- o `-b` agora marca badchars também na coluna de bytes do disassembly, não só
+  na forma escapada
 
 **v4.0**
 
@@ -715,6 +978,9 @@ continua sendo lida exatamente como antes.
 Ferramenta de pesquisa e desenvolvimento de exploit, para uso em laboratório,
 CTF, certificações e testes **autorizados por escrito**. Usar contra sistemas
 sem autorização é crime. A responsabilidade pelo uso é de quem executa.
+
+O `run` executa shellcode na máquina de onde é chamado, sem sandbox. Rode
+payload que não é seu dentro de uma VM descartável.
 
 ## Autor
 
